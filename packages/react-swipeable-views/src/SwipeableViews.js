@@ -22,6 +22,28 @@ function addEventListenerEnhanced(node, event, handler, options) {
   };
 }
 
+let runningRaf = false;
+let lastMousemoveCallback;
+
+// Mousemove operations can look janky if we update every time mousemove
+// is called. This throttles it based on requestAnimationFrame
+// while ensuring that updates still get sent eventually.
+function throttleMousemoveUpdate(callback) {
+  if (runningRaf) {
+    lastMousemoveCallback = callback;
+  } else {
+    runningRaf = true;
+    requestAnimationFrame(() => {
+      callback();
+      runningRaf = false;
+      if (lastMousemoveCallback) {
+        requestAnimationFrame(lastMousemoveCallback);
+        lastMousemoveCallback = null;
+      }
+    });
+  }
+}
+
 let styleInjected = false;
 
 // Support old version of iOS and IE 10.
@@ -550,8 +572,8 @@ class SwipeableViews extends Component {
       this.startIndex =
         -tranformNormalized.pageX /
         (this.viewLength -
-          parseInt(rootStyle.paddingLeft, 10) -
-          parseInt(rootStyle.paddingRight, 10));
+        parseInt(rootStyle.paddingLeft, 10) -
+        parseInt(rootStyle.paddingRight, 10));
     }
   };
 
@@ -605,54 +627,56 @@ class SwipeableViews extends Component {
     // We are swiping, let's prevent the scroll event.
     event.preventDefault();
 
-    // Low Pass filter.
-    this.vx = this.vx * 0.5 + (touch.pageX - this.lastX) * 0.5;
-    this.lastX = touch.pageX;
+    throttleMousemoveUpdate(() => {
+      // Low Pass filter.
+      this.vx = this.vx * 0.5 + (touch.pageX - this.lastX) * 0.5;
+      this.lastX = touch.pageX;
 
-    const { index, startX } = computeIndex({
-      children,
-      resistance,
-      pageX: touch.pageX,
-      startIndex: this.startIndex,
-      startX: this.startX,
-      viewLength: this.viewLength,
-    });
-
-    // Add support for native scroll elements.
-    if (nodeHowClaimedTheScroll === null && !ignoreNativeScroll) {
-      const domTreeShapes = getDomTreeShapes(event.target, this.rootNode);
-      const hasFoundNativeHandler = findNativeHandler({
-        domTreeShapes,
-        startX: this.startX,
+      const { index, startX } = computeIndex({
+        children,
+        resistance,
         pageX: touch.pageX,
-        axis,
+        startIndex: this.startIndex,
+        startX: this.startX,
+        viewLength: this.viewLength,
       });
 
-      // We abort the touch move handler.
-      if (hasFoundNativeHandler) {
-        return;
-      }
-    }
+      // Add support for native scroll elements.
+      if (nodeHowClaimedTheScroll === null && !ignoreNativeScroll) {
+        const domTreeShapes = getDomTreeShapes(event.target, this.rootNode);
+        const hasFoundNativeHandler = findNativeHandler({
+          domTreeShapes,
+          startX: this.startX,
+          pageX: touch.pageX,
+          axis,
+        });
 
-    // We are moving toward the edges.
-    if (startX) {
-      this.startX = startX;
-    } else if (nodeHowClaimedTheScroll === null) {
-      nodeHowClaimedTheScroll = this.rootNode;
-    }
-
-    this.setState(
-      {
-        displaySameSlide: false,
-        isDragging: true,
-        indexCurrent: index,
-      },
-      () => {
-        if (onSwitching) {
-          onSwitching(index, 'move');
+        // We abort the touch move handler.
+        if (hasFoundNativeHandler) {
+          return;
         }
-      },
-    );
+      }
+
+      // We are moving toward the edges.
+      if (startX) {
+        this.startX = startX;
+      } else if (nodeHowClaimedTheScroll === null) {
+        nodeHowClaimedTheScroll = this.rootNode;
+      }
+
+      this.setState(
+        {
+          displaySameSlide: false,
+          isDragging: true,
+          indexCurrent: index,
+        },
+        () => {
+          if (onSwitching) {
+            onSwitching(index, 'move');
+          }
+        },
+      );
+    });
   };
 
   handleSwipeEnd = () => {
@@ -670,55 +694,58 @@ class SwipeableViews extends Component {
       return;
     }
 
-    const indexLatest = this.state.indexLatest;
-    const indexCurrent = this.state.indexCurrent;
-    const delta = indexLatest - indexCurrent;
+    throttleMousemoveUpdate(() => {
 
-    let indexNew;
+      const indexLatest = this.state.indexLatest;
+      const indexCurrent = this.state.indexCurrent;
+      const delta = indexLatest - indexCurrent;
 
-    // Quick movement
-    if (Math.abs(this.vx) > this.props.threshold) {
-      if (this.vx > 0) {
-        indexNew = Math.floor(indexCurrent);
+      let indexNew;
+
+      // Quick movement
+      if (Math.abs(this.vx) > this.props.threshold) {
+        if (this.vx > 0) {
+          indexNew = Math.floor(indexCurrent);
+        } else {
+          indexNew = Math.ceil(indexCurrent);
+        }
+      } else if (Math.abs(delta) > this.props.hysteresis) {
+        // Some hysteresis with indexLatest.
+        indexNew = delta > 0 ? Math.floor(indexCurrent) : Math.ceil(indexCurrent);
       } else {
-        indexNew = Math.ceil(indexCurrent);
+        indexNew = indexLatest;
       }
-    } else if (Math.abs(delta) > this.props.hysteresis) {
-      // Some hysteresis with indexLatest.
-      indexNew = delta > 0 ? Math.floor(indexCurrent) : Math.ceil(indexCurrent);
-    } else {
-      indexNew = indexLatest;
-    }
 
-    const indexMax = Children.count(this.props.children) - 1;
+      const indexMax = Children.count(this.props.children) - 1;
 
-    if (indexNew < 0) {
-      indexNew = 0;
-    } else if (indexNew > indexMax) {
-      indexNew = indexMax;
-    }
+      if (indexNew < 0) {
+        indexNew = 0;
+      } else if (indexNew > indexMax) {
+        indexNew = indexMax;
+      }
 
-    this.setState(
-      {
-        indexCurrent: indexNew,
-        indexLatest: indexNew,
-        isDragging: false,
-      },
-      () => {
-        if (this.props.onSwitching) {
-          this.props.onSwitching(indexNew, 'end');
-        }
+      this.setState(
+        {
+          indexCurrent: indexNew,
+          indexLatest: indexNew,
+          isDragging: false,
+        },
+        () => {
+          if (this.props.onSwitching) {
+            this.props.onSwitching(indexNew, 'end');
+          }
 
-        if (this.props.onChangeIndex && indexNew !== indexLatest) {
-          this.props.onChangeIndex(indexNew, indexLatest);
-        }
+          if (this.props.onChangeIndex && indexNew !== indexLatest) {
+            this.props.onChangeIndex(indexNew, indexLatest);
+          }
 
-        // Manually calling handleTransitionEnd in that case as isn't otherwise.
-        if (indexCurrent === indexLatest) {
-          this.handleTransitionEnd();
-        }
-      },
-    );
+          // Manually calling handleTransitionEnd in that case as isn't otherwise.
+          if (indexCurrent === indexLatest) {
+            this.handleTransitionEnd();
+          }
+        },
+      );
+    });
   };
 
   handleTouchStart = event => {
